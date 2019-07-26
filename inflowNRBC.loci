@@ -1,0 +1,122 @@
+// Copyright (C) 2019, ATA Engineering, Inc.
+// 
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU Lesser General Public
+// License as published by the Free Software Foundation; either
+// version 3 of the License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+// Lesser General Public License for more details.
+// 
+// You should have received a copy of the GNU Lesser General Public License
+// along with this program; if not, write to the Free Software Foundation,
+// Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+
+#include "bctools.h"
+$include "chem.lh"
+$include "nonreflecting.lh"
+
+
+namespace chem {
+  $type boundaryName(X) param<string>;
+  $rule pointwise(
+      nonreflecting::u_f, nonreflecting::gaugePressure_f,
+      nonreflecting::temperature_f, nonreflecting::mixture_f <- Pambient, us_n,
+      pTarget, temperatureTarget, uTarget, mixtureTarget, sigmaNRBC, maxMach_X,
+      lengthScaleNRBC, rho_prev_f_lag, sos_prev_f_lag, u_prev_f_lag,
+      pg_prev_f_lag, $it, $n, area, eos, boundaryName(X),
+      ci->(gaugePressure, u, temperature, rho, soundSpeed, mixture, dt)),
+      constraint(inflowNRBC_BC, boundaryName(X)), parametric(boundaryName(X)),
+      prelude {
+    $mixture_f.setVecSize($mixtureTarget.vecSize());
+  } compute {
+    $mixture_f = $mixtureTarget;
+
+    EOS::State rs = $eos.State_from_mixture_p_T($mixtureTarget, $pTarget,
+                                                $temperatureTarget);
+    const real ureft = dot($uTarget, $area.n) - $us_n;
+
+    if (-ureft > rs.soundSpeed()) {  // supersonic inflow
+      $u_f = $uTarget;
+      $gaugePressure_f = $pTarget - $Pambient;
+      $temperature_f = $temperatureTarget;
+    } else {  // subsonic inflow
+      const vect3d ui = $ci->$u;
+      const real uit = dot(ui, $area.n) - $us_n;
+
+      const real ai = $ci->$soundSpeed;
+      const real pi = $ci->$gaugePressure;
+      const real ri = $ci->$rho;
+
+      const real uTar = dot($uTarget, $area.n) - $us_n;
+
+      // pressure at boundary
+      real pb = 0.5 * ($pTarget + pi + $Pambient - ri * ai * (uTar - uit));
+
+      const real MinPressure = 1e-2;
+      if (pb < MinPressure) {
+        pb = MinPressure;
+      }
+      $gaugePressure_f = pb - $Pambient;
+
+      // Calculate LODI terms -----------------------------------------------
+      const real sigma = $sigmaNRBC;
+      const real rhoOld = $$it == 0 ? rs.density() : $rho_prev_f_lag;
+      const real sosOld = $$it == 0 ? rs.soundSpeed() : $sos_prev_f_lag;
+      const real rhoSoS = rhoOld * sosOld;
+      const real alphaR = sigma * sosOld / $lengthScaleNRBC;
+
+      const real pgOld = $$it == 0 ? ($pTarget - $Pambient) : $pg_prev_f_lag;
+      const real deltaPressure = pb - (pgOld + $Pambient);
+
+      const real rhob = (rhoOld + $ci->$dt * alphaR * rs.density() +
+                         deltaPressure / (sosOld * sosOld)) /
+                        (1.0 + $ci->$dt * alphaR);
+
+      const real kappa =
+          sigma * sosOld * (1.0 - $maxMach_X * $maxMach_X) / $lengthScaleNRBC;
+      const vect3d uOld = $$it == 0 ? ($uTarget) : $u_prev_f_lag;
+      $u_f = (uOld + $ci->$dt * kappa * $uTarget -
+              $area.n * deltaPressure / (rhoSoS)) /
+             (1.0 + $ci->$dt * kappa);
+
+      tmp_array<real> rhoi($eos.numSpecies());
+      for (int i = 0; i < $eos.numSpecies(); ++i) {
+        rhoi[i] = rhob * $mixture_f[i];
+      }
+
+      EOS::State bs = $eos.State_from_rho_p(rhoi, pb);
+      $temperature_f = bs.temperature();
+    }
+  }
+
+  // ------------------------------------------------------------------------
+  class prec_inflow_nrbc_flux : public prec_riemann_boundary_flux {
+   public:
+    prec_inflow_nrbc_flux() { constraint("inflowNRBC_BC"); }
+  };
+
+  class prec_inflow_nrbc_fluxPT : public prec_riemann_boundary_fluxPT {
+   public:
+    prec_inflow_nrbc_fluxPT() { constraint("inflowNRBC_BC"); }
+  };
+
+  class prec_inflow_nrbc_jac : public prec_riemann_boundary_flux_jac {
+   public:
+    prec_inflow_nrbc_jac() { constraint("inflowNRBC_BC"); }
+  };
+
+  class prec_inflow_nrbc_jacPT : public prec_riemann_boundary_flux_jacPT {
+   public:
+    prec_inflow_nrbc_jacPT() { constraint("inflowNRBC_BC"); }
+  };
+
+  register_rule<prec_inflow_nrbc_flux> register_prec_inflow_nrbc_flux;
+  register_rule<prec_inflow_nrbc_jac> register_prec_inflow_nrbc_jac;
+  register_rule<prec_inflow_nrbc_fluxPT> register_prec_inflow_nrbc_fluxPT;
+  register_rule<prec_inflow_nrbc_jacPT> register_prec_inflow_nrbc_jacPT;
+
+}
+

@@ -1,0 +1,516 @@
+// Copyright (C) 2019, ATA Engineering, Inc.
+// 
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU Lesser General Public
+// License as published by the Free Software Foundation; either
+// version 3 of the License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+// Lesser General Public License for more details.
+// 
+// You should have received a copy of the GNU Lesser General Public License
+// along with this program; if not, write to the Free Software Foundation,
+// Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+
+#include "read_grid.h"
+#include "bctools.h"
+$include "chem.lh"
+$include "nonreflecting.lh"
+
+#include <vector>
+
+using std::vector;
+
+namespace chem {
+  class outflowNRBC_bc_check : public BC_Check {
+    string error_message;
+  public:
+    std::string boundaryConditions() { return "outflowNRBC"; }
+    std::string variablesChecked() { return "p,sigma,length"; }
+
+    bool checkOptions(const options_list& bc_options) {
+      error_message = "";
+      if (bc_options.optionExists("p")) {
+        if (!check_scalar_units(bc_options, "p", "Pa")) {
+          error_message = "Wrong units for 'p', use Pa";
+          return false;
+        }
+      } else {
+        error_message += "'p' must be specified with outflowNRBC";
+        return false;
+      }
+
+      if (bc_options.optionExists("length")) {
+        if (!check_scalar_units(bc_options, "length", "m")) {
+          error_message = "Wrong units for 'length', use m";
+          return false;
+        }
+      }
+      return true;
+    }
+    std::ostream &ErrorMessage(std::ostream &s) {
+      s << error_message << endl;
+      return s;
+    }
+  };
+
+  register_BC<outflowNRBC_bc_check> register_BC_outflowNRBC_bc_check;
+
+  $type AllFlowBoundaries store<bool>;
+  $rule pointwise(AllFlowBoundaries), constraint(outflowNRBC_BC) {}
+
+  $type AllDiffusionBCs store<bool>;
+  $rule pointwise(AllDiffusionBCs), constraint(outflowNRBC_BC) {}
+
+  $type AllSupersonicOutflowBCs store<bool>;
+  $rule pointwise(AllSupersonicOutflowBCs), constraint(outflowNRBC_BC) {}
+
+
+  $type sigma_BC store<real>;
+  $rule pointwise(sigma_BC <- BC_options) {
+    $sigma_BC = 0.25;  // default value
+    if ($BC_options.optionExists("sigma")) {
+      $BC_options.getOption("sigma", $sigma_BC);
+    }
+  }
+
+  $rule pointwise(sigmaNRBC <- ref->sigma_BC) { 
+    $sigmaNRBC = $ref->$sigma_BC; 
+  }
+
+  $type length_BC store<real>;
+  $rule pointwise(length_BC <- BC_options), constraint(length_BCoption) {
+    $BC_options.getOptionUnits("length", "m", $length_BC);
+  }
+
+  $rule pointwise(priority::lengthScaleNRBC <- ref->length_BC) { 
+    $lengthScaleNRBC = $ref->$length_BC; 
+  }
+
+  $rule pointwise(pTarget <- ref->p_BC) { 
+    $pTarget = $ref->$p_BC;
+  }
+
+  // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  class inflowNRBC_bc_check : public BC_Check {
+    string error_message;
+   public:
+    std::string boundaryConditions() { return "inflowNRBC"; }
+    std::string variablesChecked() {
+      return "p,T,rho,M,v,u,mixture,sigma,length,transient,normal,period";
+    }
+
+    bool checkOptions(const options_list& bc_options) {
+      error_message = "";
+
+      const bool hasP = bc_options.optionExists("p");
+      const bool hasRho = bc_options.optionExists("rho");
+      const bool hasT = bc_options.optionExists("T");
+      const bool hasMix = bc_options.optionExists("mixture");
+      const bool hasM = bc_options.optionExists("M");
+      const bool hasU = bc_options.optionExists("u");
+      const bool hasV = bc_options.optionExists("v");
+      const bool hasTransient = bc_options.optionExists("transient");
+      const bool hasPeriod = bc_options.optionExists("period");
+
+      // check inputs
+      if (hasTransient) {
+        // transient takes place of other flow variable inputs
+        if (hasP || hasRho || hasT || hasMix || hasM || hasU || hasV) {
+          error_message =
+              "transient option in inflow is incompatible with specification "
+              "of p, T, rho, M, u, v, or mixture";
+          return false;
+        }
+        if (bc_options.getOptionValueType("transient") == Loci::STRING) {
+          string filename;
+          bc_options.getOption("transient", filename);
+          ifstream file(filename.c_str());
+          if (file.fail()) {
+            error_message = "unable to open file '" + filename;
+            error_message += "' given by transient option";
+            return false;
+          }
+        } else {
+          error_message =
+              "'transient' should be assigned the filename of the time "
+              "prescribed data file";
+          return false;
+        }
+      } else if (hasPeriod) {
+        error_message = "'period' only supported with 'transient' option";
+        return false;
+      } else {
+        int stateCount = 0;
+        if (hasP) {
+          stateCount++;
+        }
+        if (hasRho) {
+          stateCount++;
+        }
+        if (hasT) {
+          stateCount++;
+        }
+        if (stateCount != 2) {
+          error_message =
+              "must specify exactly two of the thermodynamic variables: "
+              "(p,rho,T)  ";
+          return false;
+        }
+
+        int velCount = 0;
+        if (hasU) {
+          velCount++;
+        }
+        if (hasV) {
+          velCount++;
+        }
+        if (hasM) {
+          velCount++;
+        }
+        if (velCount != 1) {
+          error_message += "must specify either 'u' 'v', or 'M'  ";
+          return false;
+        }
+      }
+
+      // check units
+      if (bc_options.optionExists("length")) {
+        if (!check_scalar_units(bc_options, "length", "m")) {
+          error_message += "Units are incompatible for 'length', use 'm' ";
+          return false;
+        }
+      }
+      if (hasP) {
+        if (!check_scalar_units(bc_options, "p", "Pa")) {
+          error_message += "Units are incompatible for 'p' ";
+          return false;
+        }
+      }
+      if (hasT) {
+        if (!check_scalar_units(bc_options, "T", "K")) {
+          error_message += "Units are incompatible for 'T' ";
+          return false;
+        }
+      }
+      if (hasRho) {
+        if (!check_scalar_units(bc_options, "rho", "kg/m/m/m")) {
+          error_message += "Units are incompatible for 'rho' ";
+          return false;
+        }
+      }
+      if (hasM) {
+        if (!check_vector_units(bc_options, "M", "")) {
+          error_message += "vector not properly defined for 'M' ";
+          return false;
+        }
+      }
+      if (hasU) {
+        if (!check_vector_units(bc_options, "u", "m/s")) {
+          error_message += "vector not properly defined for 'u' ";
+          return false;
+        }
+      }
+      if (hasV) {
+        if (!check_vector_units(bc_options, "v", "m/s")) {
+          error_message += "vector not properly defined for 'v' ";
+          return false;
+        }
+      }
+
+      return true;
+    }
+    std::ostream &ErrorMessage(std::ostream &s) {
+      s << error_message << endl;
+      return s;
+    }
+  };
+
+  register_BC<inflowNRBC_bc_check> register_BC_inflowNRBC_bc_check;
+
+  // Here is a data structure for storing the time prescribed data
+  const int MAX_SPECIES = 20;
+  struct prescribed_inflow_data {
+    double time;
+    double p;
+    double T;
+    vect3d vel;
+    Loci::Array<double, MAX_SPECIES> mf;
+  };
+
+  std::ostream &operator<<(std::ostream &s, const prescribed_inflow_data &d) {
+    s << d.time << ' ' << d.p << ' ' << d.T << ' ' << d.vel.x << ' ' << d.vel.y
+      << ' ' << d.vel.z << ' ';
+    for (int i = 0; i < MAX_SPECIES; ++i) {
+      s << ' ' << d.mf[i];
+    }
+    s << endl;
+    return s;
+  }
+
+  std::istream &operator>>(std::istream &s, prescribed_inflow_data &d) {
+    s >> d.time >> d.p >> d.T >> d.vel.x >> d.vel.y >> d.vel.z;
+    for (int i = 0; i < MAX_SPECIES; ++i) {
+      s >> d.mf[i];
+    }
+    return s;
+  }
+
+  $type AllFlowBoundaries store<bool>;
+  $rule pointwise(AllFlowBoundaries), constraint(inflowNRBC_BC) {}
+
+  $type AllDiffusionBCs store<bool>;
+  $rule pointwise(AllDiffusionBCs), constraint(inflowNRBC_BC) {}
+
+  $rule pointwise(uTarget <- ref->uRef_BC) { 
+    $uTarget = $ref->$uRef_BC;
+  }
+
+  $rule pointwise(temperatureTarget <- ref->temperatureRef_BC) { 
+    $temperatureTarget = $ref->$temperatureRef_BC;
+  }
+
+  $rule pointwise(mixtureTarget <- ref->mixtureRef_BC),
+    prelude {
+    $mixtureTarget.setVecSize($mixtureRef_BC.vecSize());
+    } compute {
+    $mixtureTarget = $ref->$mixtureRef_BC;
+  }
+
+  $type inflowPeriod store<real>;
+  $rule pointwise(inflowPeriod), constraint(transient_BCoption) {
+    $inflowPeriod = 0.0;
+  }
+
+  $rule pointwise(period::inflowPeriod <- BC_options), constraint(period_BCoption) {
+    $BC_options.getOptionUnits("period", "s", $inflowPeriod);
+  }
+
+}  // end namespace chem
+
+// ----------------------------------------------------------------------
+namespace Loci {
+  // This allows us to put the prescribed_inflow_data into a Loci container
+  template <>
+  struct data_schema_traits<chem::prescribed_inflow_data> {
+    typedef IDENTITY_CONVERTER Schema_Converter;
+    static DatatypeP get_type() {
+      CompoundDatatypeP ct = CompoundFactory(chem::prescribed_inflow_data());
+      LOCI_INSERT_TYPE(ct, chem::prescribed_inflow_data, time);
+      LOCI_INSERT_TYPE(ct, chem::prescribed_inflow_data, p);
+      LOCI_INSERT_TYPE(ct, chem::prescribed_inflow_data, T);
+      LOCI_INSERT_TYPE(ct, chem::prescribed_inflow_data, vel);
+      LOCI_INSERT_TYPE(ct, chem::prescribed_inflow_data, mf);
+      return DatatypeP(ct);
+    }
+  };
+}  // end namespace Loci
+
+
+// ----------------------------------------------------------------------
+namespace chem {
+  // This routine reads a timeseries out of a file.
+  // The format of the file is as follows:
+  // NS - number of species
+  // for(i=0;i<NS;++i)
+  //   NS species names
+  // NT - number of time data
+  // for(i=0;i<NT;++i) {
+  //   time p T u v w
+  //   for(int i=0;i<NS;++i)
+  //     mf[i] (species mass fractions for species i)
+
+  void read_time_series(string filename, vector<prescribed_inflow_data> &data,
+                        vector<string> &species) {
+    // read file name
+    ifstream file(filename.c_str());
+    if (file.fail()) {
+      cerr << "unable to read '" << filename << "'" << endl;
+      Loci::Abort();
+    }
+
+    // read number of species
+    int numSpecies = 0;
+    file >> numSpecies;
+    if (numSpecies > MAX_SPECIES) {
+      cerr << "too many species in '" << filename << "'" << endl;
+      Loci::Abort();
+    }
+
+    // read species names
+    for (int i = 0; i < numSpecies; ++i) {
+      string s;
+      file >> s;
+      species.push_back(s);
+    }
+
+    // read number of time steps
+    int numData = 0;
+    file >> numData;
+    data.clear();
+
+    // loop over all time steps
+    for (int i = 0; i < numData; ++i) {
+      // read in time and fluid state quantities for time step
+      data.push_back(prescribed_inflow_data());
+      file >> data.back().time >> data.back().p >> data.back().T >>
+          data.back().vel.x >> data.back().vel.y >> data.back().vel.z;
+
+      // initialize all species mass fractions to 0
+      for (int j = 0; j < MAX_SPECIES; ++j) {
+        data.back().mf[j] = 0.;
+      }
+
+      // read in mass fractions
+      data.back().mf[0] = 1.;
+      for (int j = 0; j < numSpecies; ++j) {
+        file >> data.back().mf[j];
+      }
+
+      // sum all mass fractions
+      double sum = 0;
+      for (int j = 0; j < numSpecies; ++j) {
+        sum += data.back().mf[j];
+      }
+
+      // mass fractions should sum to 1, but normalize by total if they don't
+      for (int j = 0; j < numSpecies; ++j) {
+        data.back().mf[j] *= 1. / sum;
+      }
+    }
+  }
+
+  // Compute interpolated values for a given time, uses linear search to find
+  // time interval
+  prescribed_inflow_data interpolate_time(
+      const vector<prescribed_inflow_data> &timeset, real time) {
+    for (size_t i = 0; i < timeset.size() - 1; ++i) {
+      // if time is less than first time point for which there is data, use
+      // zeroth order extrapolation and return the data at the first time point
+      if (time < timeset[0].time) {
+        return timeset[0];
+      }
+
+      // if time is between two given time points, linearly interpolate for data
+      // at given time
+      if (time >= timeset[i].time && time <= timeset[i + 1].time) {
+        real t =
+            (time - timeset[i].time) / (timeset[i + 1].time - timeset[i].time);
+        real s = 1. - t;
+        prescribed_inflow_data interp;
+        interp.time = time;
+        interp.p = timeset[i].p * s + timeset[i + 1].p * t;
+        interp.T = timeset[i].T * s + timeset[i + 1].T * t;
+        interp.vel.x = timeset[i].vel.x * s + timeset[i + 1].vel.x * t;
+        interp.vel.y = timeset[i].vel.y * s + timeset[i + 1].vel.y * t;
+        interp.vel.z = timeset[i].vel.z * s + timeset[i + 1].vel.z * t;
+        for (int j = 0; j < MAX_SPECIES; ++j) {
+          interp.mf[j] = timeset[i].mf[j] * s + timeset[i + 1].mf[j] * t;
+        }
+        return interp;
+      }
+    }
+
+    // if time is greater than last time point for which there is data, use
+    // zeroth order extrapolation and return the data at the last time point
+    return timeset[timeset.size() - 1];
+  }
+
+  // -------------------------------------------------------------------------
+  // rules for transient prescribed inflow -----------------------------------
+  $type inflow_prescribed store<vector<prescribed_inflow_data> >;
+  $type ns_prescribed store<int>;
+  $type species_prescribed store<Loci::Array<int, MAX_SPECIES> >;
+
+  // Read in the filename from transient option and
+  // put the transient file information into Loci containers
+  $rule pointwise(inflow_prescribed, ns_prescribed, species_prescribed <- qvi,
+                  BC_options),
+      constraint(transient_BCoption) {
+    string filename;
+    $BC_options.getOption("transient", filename);
+    vector<string> species;
+    read_time_series(filename, $inflow_prescribed, species);
+    $ns_prescribed = species.size();
+
+    // if only one species, don't need to prescribe mass fraction
+    if ($qvi.numSpecies() == 1) {
+      $ns_prescribed = 0;
+    }
+
+    // initialize prescribed species to zero
+    for (int i = 0; i < MAX_SPECIES; ++i) {
+      $species_prescribed[i] = 0;
+    }
+
+    // assign prescribed species
+    for (int i = 0; i < $ns_prescribed; ++i) {
+      $species_prescribed[i] = $qvi.speciesIndex(species[i]);
+      if ($species_prescribed[i] < 0) {
+        cerr << "prescribed inflow file '" << filename << "' contains species "
+             << species[i] << " not found in simulation model." << endl;
+        Loci::Abort();
+      }
+    }
+  }
+
+  $type pInTime store<real>;
+  $type TInTime store<real>;
+  $type uInTime store<vect3d>;
+  $type mixtureInTime storeVec<real>;
+
+  // Computes the inflow bc reference conditions at a specific time
+  $rule pointwise(pInTime, TInTime, uInTime, mixtureInTime <- qvi, stime,
+                  inflow_prescribed, ns_prescribed, species_prescribed, 
+                  inflowPeriod),
+  prelude {
+    $mixtureInTime.setVecSize($qvi->numSpecies());
+  } compute {
+    // loop over species
+    for (int i = 0; i < $qvi.numSpecies(); ++i) {
+      $mixtureInTime[i] = 0;
+    }
+
+    // get simulation time
+    real simTime = $stime;
+    if ($inflowPeriod > 0.0 && $stime > $inflowPeriod) {
+      simTime = std::fmod($stime, $inflowPeriod);
+    }
+
+    // interpolate data to current time
+    prescribed_inflow_data val = interpolate_time($inflow_prescribed, simTime);
+    $pInTime = val.p;
+    $TInTime = val.T;
+    $uInTime.x = val.vel.x;
+    $uInTime.y = val.vel.y;
+    $uInTime.z = val.vel.z;
+
+    // loop over prescribed species
+    for (int i = 0; i < $ns_prescribed; ++i) {
+      $mixtureInTime[$species_prescribed[i]] = val.mf[i];
+    }
+    if ($ns_prescribed == 0) {
+      $mixtureInTime[0] = 1;
+    }
+  }
+
+  // Assigns the transient value to the faces of the boundary
+  $rule pointwise(transient::pTarget, transient::temperatureTarget,
+                  transient::uTarget, transient::mixtureTarget <- area, Pambient,
+                  ref->(pInTime, TInTime, uInTime, mixtureInTime, BC_options)),
+      constraint(inflowNRBC_BC, ref->transient_BCoption), prelude {
+    $mixtureTarget.setVecSize($mixtureInTime.vecSize());
+  } compute {
+    $pTarget = $ref->$pInTime - $Pambient;
+    $temperatureTarget = $ref->$TInTime;
+    $uTarget = $ref->$BC_options.optionExists("normal")
+                ? -norm($ref->$uInTime) * $area.n
+                : $ref->$uInTime;
+    $mixtureTarget = $ref->$mixtureInTime;
+  }
+
+}  // end namespace chem

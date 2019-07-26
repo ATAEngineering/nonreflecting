@@ -1,0 +1,307 @@
+// Copyright (C) 2019, ATA Engineering, Inc.
+// 
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU Lesser General Public
+// License as published by the Free Software Foundation; either
+// version 3 of the License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+// Lesser General Public License for more details.
+// 
+// You should have received a copy of the GNU Lesser General Public License
+// along with this program; if not, write to the Free Software Foundation,
+// Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+
+#include "bctools.h"
+$include "chem.lh"
+$include "nonreflecting.lh"
+
+#include <limits>
+#include <algorithm>
+
+namespace chem {
+  // sanity check, nonreflecting option should be used with newton iterations
+  $rule singleton(passChecks <- newton_iter), 
+    constraint(nrbcBoundary) {
+    $passChecks = true;
+    if ($newton_iter <= 1) {
+      cerr << "WARNING: outflowNRBC boundary condition should be used with "
+              "multiple newton iterations"
+           << endl;
+    }
+  }
+
+  $rule pointwise(nrbcBoundary), constraint(outflowNRBC_BC) {
+    $nrbcBoundary = true;
+  }
+  $rule pointwise(nrbcBoundary), constraint(inflowNRBC_BC) {
+    $nrbcBoundary = true;
+  }
+
+  // ------------------------------------------------------------------------
+  // get domain min and max coordinates
+  $type xMin param<real>;
+  $rule unit(xMin), constraint(UNIVERSE) {
+    $xMin = std::numeric_limits<double>::max();
+  }
+  $rule apply(xMin <- pos) [Loci::Minimum] {
+    real xLocal = $pos.x;
+    join($xMin, xLocal);
+  }
+
+  $type xMax param<real>;
+  $rule unit(xMax), constraint(UNIVERSE) {
+    $xMax = std::numeric_limits<double>::min();
+  }
+  $rule apply(xMax <- pos) [Loci::Maximum] {
+    real xLocal = $pos.x;
+    join($xMax, xLocal);
+  }
+
+  $type yMin param<real>;
+  $rule unit(yMin), constraint(UNIVERSE) {
+    $yMin = std::numeric_limits<double>::max();
+  }
+  $rule apply(yMin <- pos) [Loci::Minimum] {
+    real yLocal = $pos.y;
+    join($yMin, yLocal);
+  }
+
+  $type yMax param<real>;
+  $rule unit(yMax), constraint(UNIVERSE) {
+    $yMax = std::numeric_limits<double>::min();
+  }
+  $rule apply(yMax <- pos) [Loci::Maximum] {
+    real yLocal = $pos.y;
+    join($yMax, yLocal);
+  }
+
+  $type zMin param<real>;
+  $rule unit(zMin), constraint(UNIVERSE) {
+    $zMin = std::numeric_limits<double>::max();
+  }
+  $rule apply(zMin <- pos) [Loci::Minimum] {
+    real zLocal = $pos.z;
+    join($zMin, zLocal);
+  }
+
+  $type zMax param<real>;
+  $rule unit(zMax), constraint(UNIVERSE) {
+    $zMax = std::numeric_limits<double>::min();
+  }
+  $rule apply(zMax <- pos) [Loci::Maximum] {
+    real zLocal = $pos.z;
+    join($zMax, zLocal);
+  }
+
+  // get length scale for nonreflecting BC kappa calculation
+  $rule pointwise(lengthScaleNRBC <- xMin, xMax, yMin, yMax, zMin, zMax) {
+    const real dx = $xMax - $xMin;
+    const real dy = $yMax - $yMin;
+    const real dz = $zMax - $zMin;
+    $lengthScaleNRBC = std::max(std::max(dx, dy), dz);
+  }
+
+  // ------------------------------------------------------------------------
+  // get max mach number on boundary
+  $rule unit(maxMach_X <- ci->(u, soundSpeed), area), 
+      constraint(nrbcBoundary, boundaryName(X)), parametric(boundaryName(X)) {
+    $maxMach_X = 0.0;
+  }
+  // max mach for outlets
+  $rule apply(maxMach_X <- ci->(u, soundSpeed), area)[Loci::Maximum],
+      constraint(outflowNRBC_BC, boundaryName(X)), parametric(boundaryName(X)) {
+    real mach = dot($ci->$u, $area.n) / $ci->$soundSpeed;
+    join($maxMach_X, mach);
+  }
+  // max mach for inlets
+  $rule apply(maxMach_X <- uTarget, temperatureTarget, mixtureTarget, pTarget, 
+              area, eos, Pambient)[Loci::Maximum],
+      constraint(inflowNRBC_BC, boundaryName(X)), parametric(boundaryName(X)) {
+    EOS::State bcState = $eos.State_from_mixture_p_T(
+        $mixtureTarget, $pTarget + $Pambient, $temperatureTarget);
+    real mach = -1.0 * dot($uTarget, $area.n) / bcState.soundSpeed();
+    join($maxMach_X, mach);
+  }
+
+  // get average mach number on boundary
+  $type sumMach_X param<real>;
+  $rule unit(sumMach_X <- ci->(u, soundSpeed), area),
+    constraint(outflowNRBC_BC), parametric(boundaryName(X)) {
+    $sumMach_X = 0.0;
+  }
+  $rule apply(sumMach_X <- ci->(u, soundSpeed), area)[Loci::Summation],
+      constraint(outflowNRBC_BC, boundaryName(X)), parametric(boundaryName(X)) {
+    real mach = dot($ci->$u, $area.n) / $ci->$soundSpeed;
+    join($sumMach_X, mach);
+  }
+
+  $type numFaces_X param<int>;
+  $rule unit(numFaces_X <- ci->(u, soundSpeed)), 
+    constraint(outflowNRBC_BC), parametric(boundaryName(X)) {
+    $numFaces_X = 0;
+  }
+  $rule apply(numFaces_X <- ci->(u, soundSpeed)) [Loci::Summation], 
+    constraint(outflowNRBC_BC, boundaryName(X)), parametric(boundaryName(X)) {
+    join($numFaces_X, 1);
+  }
+
+  $rule singleton(avgMach_X <- sumMach_X, numFaces_X), 
+    constraint(outflowNRBC_BC, boundaryName(X)), parametric(boundaryName(X)) {
+    $avgMach_X = $sumMach_X / std::max(1, $numFaces_X);
+  }
+
+  // -------------------------------------------------------------------------
+  // store velocity from previous time step on boundary
+  $type u_prev_f store<vect3d>;
+  $rule pointwise(u_prev_f{n,it=-1}), 
+    constraint(nrbcBoundary{n}) {
+    $u_prev_f{n,it=-1} = vect3d(0., 0., 0.);
+  }
+
+  $rule pointwise(u_prev_f{n,it} <- u_f{n,it}, $it{n,it}, u_prev_f{n,it-1}),
+    constraint(nrbcBoundary) {
+    $u_prev_f{n,it} = $$it{n,it} == 0 ? $u_f{n,it} : $u_prev_f{n,it-1};
+  }
+
+  $rule pointwise(OUTPUT{n,it} <- u_prev_f{n,it}), prelude{};
+
+  $rule pointwise(u_prev_f_lag{n,it} <- u_prev_f{n,it-1}, $it{n,it}), 
+    constraint(nrbcBoundary) {
+    $u_prev_f_lag{n,it} = $u_prev_f{n,it-1};
+  }
+
+  // -------------------------------------------------------------------------
+  // store pressure from previous time step on boundary
+  $type pg_prev_f store<real>;
+  $rule pointwise(pg_prev_f{n,it=-1}), 
+    constraint(nrbcBoundary{n}) {
+    $pg_prev_f{n,it=-1} = 0.0;
+  }
+
+  $rule pointwise(pg_prev_f{n,it} <- gaugePressure_f{n,it}, $it{n,it},
+                  pg_prev_f{n,it-1}),
+      constraint(nrbcBoundary) {
+    $pg_prev_f{n,it} =
+        $$it{n,it} == 0 ? $gaugePressure_f{n,it} : $pg_prev_f{n,it-1};
+  }
+
+  $rule pointwise(OUTPUT{n,it} <- pg_prev_f{n,it}), prelude{};
+
+  $rule pointwise(pg_prev_f_lag{n,it} <- pg_prev_f{n,it-1}, $it{n,it}), 
+    constraint(nrbcBoundary) {
+    $pg_prev_f_lag{n,it} = $pg_prev_f{n,it-1};
+  }
+
+  // -------------------------------------------------------------------------
+  // store density from previous time step on boundary
+  $type rho_prev_f store<real>;
+  $rule pointwise(rho_prev_f{n,it=-1}), 
+    constraint(nrbcBoundary{n}) {
+    $rho_prev_f{n,it=-1} = 0.0;
+  }
+
+  $rule pointwise(rho_prev_f{n,it} <- ci->rho{n,it}, $it{n,it},
+                  rho_prev_f{n,it-1}),
+      constraint(outflowNRBC_BC) {
+    $rho_prev_f{n,it} =
+        $$it{n,it} == 0 ? $ci->$rho{n,it} : $rho_prev_f{n,it-1};
+  }
+  $rule pointwise(rho_prev_f{n,it} <- mixture_f{n,it}, gaugePressure_f{n,it}, 
+                  temperature_f{n,it}, $it{n,it}, eos, Pambient, 
+                  rho_prev_f{n,it-1}),
+      constraint(inflowNRBC_BC) {
+    EOS::State bcState = $eos.State_from_mixture_p_T(
+        $mixture_f{n,it}, $gaugePressure_f{n,it} + $Pambient,
+        $temperature_f{n,it});
+    $rho_prev_f{n, it} =
+        $$it{n, it} == 0 ? bcState.density() : $rho_prev_f{n,it-1};
+  }
+
+  $rule pointwise(OUTPUT{n,it} <- rho_prev_f{n,it}), prelude{};
+
+  $rule pointwise(rho_prev_f_lag{n,it} <- rho_prev_f{n,it-1}, $it{n,it}), 
+    constraint(nrbcBoundary) {
+    $rho_prev_f_lag{n,it} = $rho_prev_f{n,it-1};
+  }
+
+  // -------------------------------------------------------------------------
+  // store speed of sound from previous time step on boundary
+  $type sos_prev_f store<real>;
+  $rule pointwise(sos_prev_f{n,it=-1}), 
+    constraint(nrbcBoundary{n}) {
+    $sos_prev_f{n,it=-1} = 0.0;
+  }
+
+  $rule pointwise(sos_prev_f{n,it} <- ci->soundSpeed{n,it}, $it{n,it},
+                  sos_prev_f{n,it-1}),
+      constraint(outflowNRBC_BC) {
+    $sos_prev_f{n,it} =
+        $$it{n,it} == 0 ? $ci->$soundSpeed{n,it} : $sos_prev_f{n,it-1};
+  }
+  $rule pointwise(sos_prev_f{n,it} <- mixture_f{n,it}, gaugePressure_f{n,it}, 
+                  temperature_f{n,it}, eos, Pambient, $it{n,it},
+                  sos_prev_f{n,it-1}),
+      constraint(inflowNRBC_BC) {
+    EOS::State bcState = $eos.State_from_mixture_p_T(
+        $mixture_f{n,it}, $gaugePressure_f{n,it} + $Pambient,
+        $temperature_f{n,it});
+    $sos_prev_f{n, it} =
+        $$it{n, it} == 0 ? bcState.soundSpeed() : $sos_prev_f{n, it - 1};
+  }
+
+  $rule pointwise(OUTPUT{n,it} <- sos_prev_f{n,it}), prelude{};
+
+  $rule pointwise(sos_prev_f_lag{n,it} <- sos_prev_f{n,it-1}, $it{n,it}), 
+    constraint(nrbcBoundary) {
+    $sos_prev_f_lag{n,it} = $sos_prev_f{n,it-1};
+  }
+
+  // -------------------------------------------------------------------------
+  // store pressure gradient from previous time step on boundary
+  $type pGrad_prev_f store<vect3d>;
+  $rule pointwise(pGrad_prev_f{n,it=-1}), 
+    constraint(outflowNRBC_BC{n}) {
+    $pGrad_prev_f{n,it=-1} = vect3d(0., 0., 0.);
+  }
+
+  $rule pointwise(pGrad_prev_f{n,it} <- grads_f(gaugePressure){n,it}, $it{n,it},
+                  pGrad_prev_f{n,it-1}),
+      constraint(outflowNRBC_BC) {
+    $pGrad_prev_f{n,it} =
+        $$it{n,it} == 0 ? $grads_f(gaugePressure){n,it} : $pGrad_prev_f{n,it-1};
+  }
+
+  $rule pointwise(OUTPUT{n,it} <- pGrad_prev_f{n,it}), prelude{};
+
+  $rule pointwise(pGrad_prev_f_lag{n,it} <- pGrad_prev_f{n,it-1}, $it{n,it}), 
+    constraint(outflowNRBC_BC) {
+    $pGrad_prev_f_lag{n,it} = $pGrad_prev_f{n,it-1};
+  }
+
+  // -------------------------------------------------------------------------
+  // store velocity gradient from previous time step on boundary
+  $type uGrad_prev_f store<tens3d>;
+  $rule pointwise(uGrad_prev_f{n,it=-1}), 
+    constraint(outflowNRBC_BC{n}) {
+    vect3d zero(0., 0., 0.);
+    $uGrad_prev_f{n,it=-1} = tens3d(zero, zero, zero);
+  }
+
+  $rule pointwise(uGrad_prev_f{n,it} <- gradv3d_f(u){n,it}, $it{n,it},
+                  uGrad_prev_f{n,it-1}),
+      constraint(outflowNRBC_BC) {
+    $uGrad_prev_f{n, it} =
+        $$it{n,it} == 0 ? $gradv3d_f(u){n,it} : $uGrad_prev_f{n,it-1};
+  }
+
+  $rule pointwise(OUTPUT{n,it} <- uGrad_prev_f{n,it}), prelude{};
+
+  $rule pointwise(uGrad_prev_f_lag{n,it} <- uGrad_prev_f{n,it-1}, $it{n,it}), 
+    constraint(outflowNRBC_BC) {
+    $uGrad_prev_f_lag{n,it} = $uGrad_prev_f{n,it-1};
+  }
+}
+

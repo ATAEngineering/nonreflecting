@@ -1,0 +1,156 @@
+// Copyright (C) 2019, ATA Engineering, Inc.
+// 
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU Lesser General Public
+// License as published by the Free Software Foundation; either
+// version 3 of the License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+// Lesser General Public License for more details.
+// 
+// You should have received a copy of the GNU Lesser General Public License
+// along with this program; if not, write to the Free Software Foundation,
+// Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+
+#include "bctools.h"
+$include "chem.lh"
+$include "nonreflecting.lh"
+
+namespace chem {
+
+  $rule pointwise(nonreflecting::u_f, nonreflecting::gaugePressure_f, 
+                  nonreflecting::temperature_f, nonreflecting::mixture_f
+                  <- Pambient,
+		              us_n, pTarget, maxMach_X, avgMach_X, lengthScaleNRBC,
+                  $it, u_prev_f_lag, pg_prev_f_lag, pGrad_prev_f_lag, sigmaNRBC,
+                  uGrad_prev_f_lag, rho_prev_f_lag, sos_prev_f_lag, passChecks,
+		              ci->(gaugePressure,u,temperature,rho,soundSpeed,mixture,dt),
+                  area, eos),
+    constraint(outflowNRBC_BC, boundaryName(X)), parametric(boundaryName(X)),
+    prelude {
+      $mixture_f.setVecSize($mixture.vecSize());
+  } compute {
+    const vect3d ui = $ci->$u;
+    const real uit = dot(ui, $area.n) - $us_n;
+
+    const real ai = $ci->$soundSpeed;
+    const real pi = $ci->$gaugePressure;
+    EOS::State rs = $eos.State_from_mixture_p_T($ci->$mixture, pi + $Pambient,
+                                                $ci->$temperature);
+    const real gamma = rs.Gamma();
+    $mixture_f = $ci->$mixture;
+
+    if (uit >= ai) {  // supersonic outflow
+      $u_f = ui;
+      $gaugePressure_f = pi;
+      $temperature_f = $ci->$temperature;
+    } else {
+      // calculate LODI terms -------------------------------------------
+      const real sigma = $sigmaNRBC;
+      const real rhoOld = $$it == 0 ? ($ci->$rho) : $rho_prev_f_lag;
+      const real sosOld = $$it == 0 ? ai : $sos_prev_f_lag;
+      const real rhoSoS = rhoOld * sosOld;
+      const real kappa =
+          sigma * sosOld * (1.0 - $maxMach_X * $maxMach_X) / $lengthScaleNRBC;
+
+      const vect3d uOld = $$it == 0 ? ui : $u_prev_f_lag;
+      const real du = dot(ui - uOld, $area.n);
+      const real pgOld = $$it == 0 ? pi : $pg_prev_f_lag;
+
+      // calculate transverse terms -------------------------------------
+      // these terms come from equation 6 in Yoo & Im, 2006.
+      // -0.5 * (V_t (dot) (Grad_t(P) - rho sos du_n/d_t) +
+      //         gamma P Grad_t (dot) V_t)
+      // V_t -> transverse velocity
+      // Grad_t(P) -> transverse pressure gradient
+      // du_n/d_t -> derivative of normal velocity wrt transverse directions
+      // Grad_t (dot) V_t -> sum of transverse velocity wrt transverse dirs
+
+      // transverse relaxation term
+      const real betaNR = $avgMach_X;
+
+      // calculate transverse pressure gradient
+      const vect3d pGradT =
+          $pGrad_prev_f_lag - dot($pGrad_prev_f_lag, $area.n) * $area.n;
+
+      // caclulate transverse components of velocity gradient
+      const tens3d uGradTrans = tens3d(
+          $uGrad_prev_f_lag.x - dot($uGrad_prev_f_lag.x, $area.n) * $area.n,
+          $uGrad_prev_f_lag.y - dot($uGrad_prev_f_lag.y, $area.n) * $area.n,
+          $uGrad_prev_f_lag.z - dot($uGrad_prev_f_lag.z, $area.n) * $area.n);
+      // calculate derivative of normal velocity wrt transverse directions
+      const vect3d dun_dt = uGradTrans.x * $area.n.x +
+                            uGradTrans.y * $area.n.y + uGradTrans.z * $area.n.z;
+      // sum of deriviatives of transverse velocity wrt transverse directions
+      const real dut_dt = uGradTrans.x.x + uGradTrans.x.y + uGradTrans.x.z +
+                          uGradTrans.y.x + uGradTrans.y.y + uGradTrans.y.z +
+                          uGradTrans.z.x + uGradTrans.z.y + uGradTrans.z.z -
+                          (dun_dt.x + dun_dt.y + dun_dt.z);
+
+      // transverse velocity
+      const vect3d uT = uOld - dot(uOld, $area.n) * $area.n;
+
+      const real transverse = -0.5 * (dot(uT, pGradT - rhoSoS * dun_dt) +
+                                      gamma * (pgOld + $Pambient) * dut_dt);
+
+      // calculate pressure on boundary ----------------------------------
+      const real pb =
+          (pgOld + $Pambient + rhoSoS * du + $ci->$dt * kappa * $pTarget -
+           $ci->$dt * betaNR * transverse) /
+          (1.0 + $ci->$dt * kappa);
+
+      $gaugePressure_f = pb - $Pambient;
+
+      const real MinPressure = 1e-4;
+      if ($gaugePressure_f + $Pambient < MinPressure) {
+        $gaugePressure_f = MinPressure - $Pambient;
+      }
+
+      // calculate velocity and density on boundary ----------------------
+      $u_f = ui + $area.n * (pi - $gaugePressure_f) / ($ci->$rho * ai);
+      const real rhob = $ci->$rho + ($gaugePressure_f - pi) / (ai * ai);
+
+      tmp_array<real> rhoi($eos.numSpecies());
+      for (int i = 0; i < $eos.numSpecies(); ++i) {
+        rhoi[i] = max(rhob, .1 * $ci->$rho) * $mixture_f[i];
+      }
+      EOS::State bs = $eos.State_from_rho_p(rhoi, $gaugePressure_f + $Pambient);
+      $temperature_f = bs.temperature();
+
+      if (dot($u_f, $area.n) - $us_n > bs.soundSpeed()) {
+        $u_f = ui;
+        $gaugePressure_f = pi;
+        $temperature_f = $ci->$temperature;
+      }
+    }
+  }
+
+  class prec_outflow_nrbc_flux : public prec_riemann_boundary_flux {
+   public:
+    prec_outflow_nrbc_flux() { constraint("outflowNRBC_BC"); }
+  };
+
+  class prec_outflow_nrbc_fluxPT : public prec_riemann_boundary_fluxPT {
+   public:
+    prec_outflow_nrbc_fluxPT() { constraint("outflowNRBC_BC"); }
+  };
+
+  class prec_outflow_nrbc_jac : public prec_riemann_boundary_flux_jac {
+   public:
+    prec_outflow_nrbc_jac() { constraint("outflowNRBC_BC"); }
+  };
+
+  class prec_outflow_nrbc_jacPT : public prec_riemann_boundary_flux_jacPT {
+   public:
+    prec_outflow_nrbc_jacPT() { constraint("outflowNRBC_BC"); }
+  };
+
+  register_rule<prec_outflow_nrbc_flux> register_prec_outflow_nrbc_flux;
+  register_rule<prec_outflow_nrbc_jac> register_prec_outflow_nrbc_jac;
+  register_rule<prec_outflow_nrbc_fluxPT> register_prec_outflow_nrbc_fluxPT;
+  register_rule<prec_outflow_nrbc_jacPT> register_prec_outflow_nrbc_jacPT;
+
+}
+

@@ -1,0 +1,50 @@
+// Copyright (C) 2019, ATA Engineering, Inc.
+// 
+// This program is free software; you can redistribute it and/or
+// modify it under the terms of the GNU Lesser General Public
+// License as published by the Free Software Foundation; either
+// version 3 of the License, or (at your option) any later version.
+// 
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+// Lesser General Public License for more details.
+// 
+// You should have received a copy of the GNU Lesser General Public License
+// along with this program; if not, write to the Free Software Foundation,
+// Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+
+
+#ifndef NRBCDEF
+#define NRBCDEF
+
+#include <string>
+
+$type sigmaNRBC store<real>;
+$type lengthScaleNRBC store<real>;
+$type pTarget store<real>;
+$type uTarget store<vect3d>;
+$type temperatureTarget store<real>;
+$type mixtureTarget storeVec<real>;
+$type passChecks param<bool>;
+$type nrbcBoundary store<bool>;
+
+$type uGrad_prev_f_lag store<tens3d>;
+$type pGrad_prev_f_lag store<vect3d>;
+$type sos_prev_f_lag store<real>;
+$type rho_prev_f_lag store<real>;
+$type pg_prev_f_lag store<real>;
+$type u_prev_f_lag store<vect3d>;
+
+$type avgMach_X param<real>;
+$type maxMach_X param<real>;
+
+$type length_BCoption Constraint;
+$type inflowNRBC_BC Constraint;
+$type outflowNRBC_BC Constraint;
+$type transient_BCoption Constraint;
+$type period_BCoption Constraint;
+
+$type boundaryName(X) param<std::string>;
+
+#endif

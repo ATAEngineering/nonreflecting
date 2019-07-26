@@ -1,0 +1,177 @@
+\documentclass{article}
+%% Change fonts to something friendly to acrobat
+%%
+%\usepackage{courier}
+%\usepackage{times,mathptmx}
+%\DeclareMathAlphabet{\bm}{OT1}{ptm}{b}{it}
+\usepackage{graphicx}
+\usepackage{amsmath} % used for extended formula formatting tools
+\usepackage{amssymb}
+\usepackage{theorem}
+\usepackage{euscript}
+
+\topmargin  0.0in
+\headheight  0.15in
+\headsep  0.15in
+\footskip  0.2in
+\textheight 8.45in
+
+\oddsidemargin 0.56in
+\evensidemargin \oddsidemargin
+\textwidth 5.8in
+
+\pagestyle{myheadings}
+\markright{\bf Nonreflecting Boundary Conditions User Guide}
+
+\begin{document}
+
+
+\title{Nonreflecting Boundary Conditions User Guide.}
+
+\author{ Michael Nucci }
+
+\maketitle
+\section{Nonreflecting Boundary Conditions}
+
+Nonreflecting boundary conditions (NRBCs) are necessary for simulations where it is critical to resolve pressure fluctuations in the fluid domain. Examples of such simulations are computational aeroacoustics, large-eddy simulations, and direct numerical simulations.  In cases where standard boundary conditions may allow reflections that could corrupt pressure fluctuation data, NRBCs can be used to reduce these reflections and yield a more accurate simulation.
+
+\subsection{Nonreflecting Inflow}
+
+For a subsonic inflow, two characteristics point into the domain (when one-dimensional flow is being considered). The incoming one-dimensional characteristic equations are shown below \cite{Hirsch}.
+
+\begin{equation}
+\frac{\partial w_1}{\partial t} = \frac{\partial \rho}{\partial t} - \frac{1}{c^2} \frac{\partial p}{\partial t}
+\end{equation}
+
+\begin{equation}
+\frac{\partial w_2}{\partial t} = \frac{\partial u}{\partial t} + \frac{1}{\rho c} \frac{\partial p}{\partial t}
+\end{equation}
+
+Although far less problematic than outflow boundary conditions, a standard characteristic based inflow boundary condition can cause reflections into the domain. These boundary conditions can be made to reduce reflections by relaxing the values of the primitive variables specified on the boundary with respect to their target values. This relaxation approach is used in conjunction with the locally one-dimensional inviscid (LODI) assumption to derive the boundary condition \cite{Yoo2}. 
+
+The nonreflecting inflow boundary condition implemented in Loci/CHEM sets the density and velocity on the boundary at time {\tt n+1} using solution data available at time {\tt n}. 
+
+\begin{equation}
+\rho^{n+1} = \frac{\rho^n + \Delta t \alpha^n \rho_{target} + \frac{\Delta p}{c^{n^2}}}{1 + \Delta t \alpha^n}
+\end{equation}
+
+\begin{equation}
+\alpha = \frac{\sigma c}{L}
+\end{equation}
+
+The LODI relaxation coefficient {\tt $\alpha$} is calculated using solution data from time {\tt n}. The coefficient also depends on the constants {\tt $\sigma$} and {\tt L}. The default value for {\tt $\sigma$} is 0.25, but this can be changed in the boundary condition specification. {\tt L} is a length scale for the simulation domain. The default value is calculated by finding the maximum {\tt $\Delta x$}, {\tt $\Delta y $}, and {\tt $\Delta z$} between all the cell center positions in the domain and then taking the maximum of those three values. This default can also be changed in the boundary condition specification.
+
+\begin{equation}
+\tilde{u}^{n+1} = \frac{\tilde{u}^n + \Delta t \kappa^n \tilde{u}_{target} - \tilde{n} \frac{\Delta p}{\rho^n c^n}}{1 + \Delta t \kappa^n}
+\end{equation}
+
+\begin{equation}
+\kappa = \sigma c \frac{1 - M^{2}_{max}}{L}
+\end{equation}
+
+The relaxation coefficient {\tt $\kappa$} is calculated in the same manner as {\tt $\alpha$}. The Mach number used in the calculation is the maximum Mach number on the boundary.
+
+\subsection{Nonreflecting Outflow}
+
+For a subsonic outflow, a single characteristic points into the domain. The incoming one-dimensional characteristic equation is shown below.
+
+\begin{equation}
+\frac{\partial w_3}{\partial t} = \frac{\partial u}{\partial t} - \frac{1}{\rho c} \frac{\partial p}{\partial t}
+\end{equation}
+
+In a standard pressure outflow boundary condition the pressure is prescribed and held fixed on the boundary ({\it{i.e.}, \tt $\frac{\partial p}{\partial t} = 0$}). This implementation causes a reflection of intensity {\tt $\frac{\partial u}{\partial t}$} at the boundary.  For a truly nonreflecting boundary condition {\tt $\frac{\partial w}{\partial t} = 0 $}. However using this boundary condition can cause difficulty in setting the pressure on the boundary, as the pressure tends to float away from the target value \cite{Granet}.  In practice a relaxation coefficient is used on the boundary which balances the need to hold the pressure fixed with the need to reduce reflections on the boundary.
+
+Nonreflecting outflow boundary conditions were first implemented under the LODI assumption. This represents an improvement of the standard pressure outflow, but unlike with the inflow boundary, it is not sufficient; this implementation still permits significant reflections when the LODI assumption breaks down ({\it{e.g.}}, multidimensional flow on the boundary). The LODI implementation has been extended to include transverse terms to account for multidimensional flow at the outflow boundary \cite{Yoo1}. Inclusion of the transverse terms improves the performance of the outflow boundary condition in realistic flow configurations.
+
+The nonreflecting outflow boundary condition implemented in Loci/CHEM sets the pressure on the boundary at time {\tt n+1} using solution data available at time {\tt n}. It includes both the LODI relaxation coefficient {\tt $\kappa$}, which is calculated the same way as in the inflow case, and the transverse terms {\tt T}.
+
+\begin{equation}
+p^{n+1} = \frac{p^n + \left( \Delta \tilde{u} \cdot \tilde{n} \right) \rho^n c^n + \Delta t \kappa^n p_{target} - \beta^n T^n}{1 + \Delta t \kappa^n}
+\end{equation}
+
+The transverse terms {\tt T} are also calculated using solution data from time {\tt n}. The transverse terms depend on gradients in the transverse directions. The subscript {\tt t} refers to the transverse direction whereas the subscript {\tt n} refers to the boundary normal direction. The transverse relaxation coefficient {\tt $\beta$} is calculated from the average Mach number on the outflow boundary.
+
+
+\begin{equation}
+T = - 0.5 \left[ \tilde{u}_t \cdot \left( \tilde{\nabla}_t p - \rho c \tilde{\nabla}_t \tilde{u_n} \right) + \gamma p \left( \tilde{\nabla}_t \cdot \tilde{u}_t \right) \right]
+\end{equation}
+
+\begin{equation}
+\beta = M_{avg}
+\end{equation}
+
+
+\section{Nonreflecting Boundary Condition Usage}
+
+To access nonreflecting boundary conditions, load the {\tt nonreflecting} module.
+
+\begin{verbatim}
+loadModule: nonreflecting
+\end{verbatim}
+
+When nonreflecting boundary conditions are used, it is recommended that the user increase the number of newton iterations from what would typically be used for an unsteady simulation. The rationale for this recommendation is that the pressure applied at the boundary {\tt $p^{n+1}$} is actually calculated at the newton subiteration level, so more subiterations may be required to converge upon the solution at each time step.
+
+\subsection{Boundary Condition Specifications}
+
+
+The nonreflecting boundary conditions may be assigned in the same manner as standard boundary conditions. The following boundary condition identifiers are accepted:
+  {\tt inflowNRBC} and {\tt outflowNRBC}. \\
+
+  
+  Notes on nonreflecting boundary conditions:
+
+  \begin{list}{}{}
+
+    
+  \item {\tt inflowNRBC}
+
+    This is a characteristic-based boundary condition
+    that uses the given thermodynamic state ({\it{e.g.}}, {\tt
+      inflowNRBC(p=1atm, T=300K, M=0.3, mixture=[N2=0.78,O2=0.22])}) to compute the inflow conditions and the boundary flux while attempting to reduce reflections into the domain.  This
+    boundary condition may be used for subsonic or supersonic inflow
+    conditions. Use this boundary condition in cases where you would normally use the {\tt inflow} boundary condition but it is critical to reduce reflections at the boundary, such as a large eddy simulation. Optional inputs to this boundary condition include {\tt sigma} and {\tt length}, which are used in the calculation of the relaxation parameter {\tt $\kappa$}. 
+    
+    Transient conditions may be specified from a space delimited file by using the {\tt transient} option. The first line contains the number of species. The second line lists the species' names. The third line contains the number of time points. The remaining lines consist of the fluid variables at a point in time. 
+    
+\begin{verbatim}
+    time P T u v w <mixture mass fractions>
+\end{verbatim}
+    
+    The fluid variables on the boundary will be linearly interpolated from the provided time points. An example of the {\tt transient} file syntax is shown below. If the {\tt normal} option is specified on the boundary the velocity specified in the {\tt transient} file will be oriented in the boundary normal direction.
+    
+\begin{verbatim}
+    5
+    O2 N2 NO O N
+    4
+    1.0e-3 101300 300 100 0 0 0.2 0.8 0 0 0
+    2.0e-3 101300 400 100 0 0 0.2 0.8 0 0 0
+    3.0e-3 101300 500 100 0 0 0.2 0.8 0 0 0
+    4.0e-3 101300 600 100 0 0 0.2 0.8 0 0 0
+\end{verbatim}
+
+  \item {\tt outflowNRBC}
+    
+    This is a characteristic-based boundary condition that attempts to impose a target constant static pressure at the outflow boundary while reducing reflections back into the domain ({\it{e.g.}}, {\tt outflowNRBC(p=1atm)}).  Use this boundary condition in cases where you would normally use the {\tt outflow} boundary condition but it is critical to reduce reflections at the boundary, such as a large-eddy simulation.  If the outflow becomes supersonic, this boundary condition switches to a supersonic outflow boundary condition ({\it{i.e.}}, {\tt extrapolate}) in which the pressure is no longer prescribed. Optional inputs to this boundary condition include {\tt sigma} and {\tt length}, which are used in the calculation of the relaxation parameter {\tt $\kappa$}.
+
+\begin{verbatim}
+    // Nonreflecting boundary condition setup
+    BC_1=inflowNRBC(p=101300 Pa, T=288 K, M=0.5, sigma=0.25, length=0.1 m),
+    BC_2=outflowNRBC(p=101300 Pa, sigma=0.25, length=0.1 m),
+\end{verbatim}
+
+
+  \end{list}
+
+
+\clearpage
+
+
+
+\bibliography{thesis}
+\bibliographystyle{aiaa}
+
+\end{document}
+
+
+
+
